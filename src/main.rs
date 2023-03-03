@@ -1,65 +1,110 @@
-use std::process::CommandEnvs;
-use std::sync::Arc;
+use std::io;
 use reqwest::{Body, Client, Proxy};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-// use tokio::
-use tokio::*;
+use serde_json::{Map, Value};
 
-struct ChatBot {}
+const HTTP_PROXY: &str = "http://q00569923:Heyjude19,.@proxyuk.huawei.com:8080";
+const KEY: &str = "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";
+
+pub(crate) mod url {
+    // use lazy_static::lazy_static;
+
+    // lazy_static! {
+    pub(crate) const PREFIX: &'static str = "https://api.openai.com/";
+    pub(crate) const MODELS: &'static str = "https://api.openai.com/v1/models";
+    pub(crate) const CHAT_COMPLETION: &'static str = "https://api.openai.com/v1/chat/completions";
+    // }
+}
+
+
+struct ChatBot {
+    header: HeaderMap,
+    client: Client,
+}
 
 impl ChatBot {
-    pub async fn new() -> Result<(), String> {
-        const KEY: &str = "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";
-        const URL: &str = "https://api.openai.com/v1/models";
-        const HTTP_PROXY: &str = "";
+    pub fn new() -> Result<Self, String> {
+        Ok(Self {
+            header: HeaderMap::from_iter(vec![
+                (
+                    HeaderName::from_static("authorization"),
+                    HeaderValue::from_str(format!("Bearer {KEY}").as_str()).map_err(|err| err
+                        .to_string())?,
+                ),
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/json"),
+                ),
+            ]),
+            client: {
+                let http_proxy = Proxy::all(HTTP_PROXY).map_err(|err| err.to_string())?;
+                let client = Client::builder().proxy(http_proxy).build().unwrap();
+                client
+            },
+        })
+    }
 
-        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-        use reqwest::Body;
-
-
-        // let https_proxy = Proxy::https(HTTPS_PROXY).map_err(|err| err.to_string())?;
-        let http_proxy = Proxy::all(HTTP_PROXY).map_err(|err| err.to_string())?;
-        let client = Client::builder().proxy(http_proxy).build().unwrap();
-
-        let header_map = HeaderMap::from_iter(vec![
-            (
-                HeaderName::from_static("authorization"),
-                HeaderValue::from_static("Bearer ${KEY}"),
-            ),
-            (
-                HeaderName::from_static("content-type"),
-                HeaderValue::from_static("application/json"),
-            ),
-        ]);
-
-
-        let req = client.get(URL).build().map_err(|err| err.to_string())?;
-        match client.execute(req).await {
-            Ok(res) =>
-                println!("{}", res.text().await.map_err(|err| err.to_string())?),
-            Err(err) => {
-                println!("{}", err);
-            }
+    pub async fn chat(&self, content: String) -> Result<(), String> {
+        // println!("user : {}\n", content);
+        let body_json = serde_json::Map::from_iter([
+            ("model".to_string(), Value::String("gpt-3.5-turbo".to_string())),
+            ("messages".to_string(), Value::Array(vec![
+                Value::Object(serde_json::Map::from_iter([
+                    ("role".to_string(), Value::String("user".to_string())),
+                    ("content".to_string(), Value::String(format!("{content}").to_string())),
+                ].into_iter()))]))].into_iter());
+        let body = Body::from(serde_json::to_string(&body_json).map_err(|err| err.to_string())?);
+        let req = self.client.post(url::CHAT_COMPLETION).body(body).headers(self.header.clone())
+            .build()
+            .map_err(|err|
+                err
+                    .to_string
+                    ())?;
+        let res = self.client.execute(req).await.map_err(|err| err.to_string())?;
+        let result = res.json::<Map<String, Value>>().await.map_err(|err| err.to_string())?;
+        if let Value::Array(choices) = result.get("choices").ok_or("No choices returned"
+            .to_string())? {
+            choices.iter().for_each(|choice| {
+                if let Value::Object(choice_map) = choice {
+                    if let Some(Value::Object(message)) = &choice_map.get("message") {
+                        let role = if let Some(Value::String(role)) = message.get("role") {
+                            role.to_string()
+                        } else {
+                            "gpt".to_string()
+                        };
+                        if let Some(Value::String(content)) = &message.get("content") {
+                            println!("{} : {}", role, content);
+                        }
+                    }
+                }
+            })
         }
+        Ok(())
+    }
 
-
-        let body = Body::from(
-            r#"{"model": "text-davinci-003", "prompt": "Say this is a test", "temperature": 0, "max_tokens": 7}"#,
-        );
-
-        let resp = client.post(URL).headers(header_map).body(body).send().await.map_err(|err| err.to_string())?;
-
-        println!("{}", resp.text().await.map_err(|err| err.to_string())?);
-
+    pub async fn get(&self) -> Result<(), String> {
+        let req = self.client.get(url::MODELS.to_string()).headers(self.header.clone()).build()
+            .map_err(|err|
+                err
+                    .to_string
+                    ())?;
+        let _req = self.client.execute(req).await.map_err(|err| err.to_string())?;
         Ok(())
     }
 }
 
-
-fn main() {
-    let executor = Arc::new(tokio::runtime::Runtime::new().unwrap());
-
-    executor.spawn(Box::pin((async move {
-        let _ = ChatBot::new().await;
-    })));
+#[tokio::main]
+async fn main() {
+    if let Ok(chat_bot) = ChatBot::new() {
+        println!("Chat started");
+        println!("Press q to quit");
+        let mut input = "".to_string();
+        while let Ok(_input_size) = io::stdin().read_line(&mut input) {
+            if input == "q\n" {
+                return;
+            }
+            let _ = chat_bot.chat(input.to_string()).await;
+        }
+    }
 }
+
