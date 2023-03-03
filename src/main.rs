@@ -13,7 +13,11 @@ pub(crate) mod url {
     pub(crate) const PREFIX: &'static str = "https://api.openai.com/";
     pub(crate) const MODELS: &'static str = "https://api.openai.com/v1/models";
     pub(crate) const CHAT_COMPLETION: &'static str = "https://api.openai.com/v1/chat/completions";
-    // }
+}
+
+mod model {
+    pub(crate) const GPT_3_5: &'static str = "gpt-3.5-turbo";
+    pub(crate) const GPT: &'static str = "gpt-3.5-turbo";
 }
 
 
@@ -73,7 +77,7 @@ impl ChatBot {
                             "gpt".to_string()
                         };
                         if let Some(Value::String(content)) = &message.get("content") {
-                            println!("{} : {}", role, content);
+                            println!("{}:{}", role, content);
                         }
                     }
                 }
@@ -82,13 +86,23 @@ impl ChatBot {
         Ok(())
     }
 
-    pub async fn get(&self) -> Result<(), String> {
+    pub async fn list_model(&self) -> Result<(), String> {
         let req = self.client.get(url::MODELS.to_string()).headers(self.header.clone()).build()
             .map_err(|err|
                 err
                     .to_string
                     ())?;
-        let _req = self.client.execute(req).await.map_err(|err| err.to_string())?;
+        let res = self.client.execute(req).await.map_err(|err| err.to_string())?;
+        let result = res.json::<Map<String, Value>>().await.map_err(|err| err.to_string())?;
+        if let Some(Value::Array(models)) = result.get("data") {
+            models.iter().for_each(|model| {
+                if let Value::Object(model) = model {
+                    if let Some(Value::String(model)) = model.get("id") {
+                        println!("{}", model);
+                    }
+                }
+            })
+        }
         Ok(())
     }
 }
@@ -100,8 +114,12 @@ async fn main() {
         println!("Press q to quit");
         let mut input = "".to_string();
         while let Ok(_input_size) = io::stdin().read_line(&mut input) {
-            if input == "q\n" {
+            if input.strip_suffix(&['\r', '\n']) == Some("q") {
                 return;
+            }
+            if input.strip_suffix(&['\r', '\n']) == Some("-l") {
+                let _ = chat_bot.list_model().await;
+                continue;
             }
             let _ = chat_bot.chat(input.to_string()).await;
         }
