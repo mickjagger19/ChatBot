@@ -1,23 +1,20 @@
+use std::env;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use lazy_static::lazy_static;
-use reqwest::{Body, Client, Proxy, Response};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde_json::{Map, to_string, Value};
+
+use async_openai::Client;
+use async_openai::types::{
+    ChatCompletionRequestMessage, CreateChatCompletionRequest, CreateChatCompletionRequestArgs,
+    CreateChatCompletionResponse, CreateCompletionRequest, CreateCompletionResponse, Prompt, Role,
+};
+use futures::{future, Stream, TryStreamExt};
+use parking_lot::RwLock;
 use crate::model::model::{CODE, GPT_3_5};
-use crate::url::url::{CHAT_COMPLETION, CODE_COMPLETION};
-use crate::url::url::MODELS;
-use async_openai::types::{ChatCompletionRequestMessage, CreateChatCompletionRequest, CreateChatCompletionResponse, CreateCompletionRequest, CreateCompletionResponse, Prompt, Role};
-
-// const HTTP_PROXY: &str = "http://p_vnextcie:vNext49!@proxyuk.huawei.com:8080";
-const HTTP_PROXY: &str = "http://q00569923:Heyjude19,.@proxyuk.huawei.com:8080";
-const KEY: &str = "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";
-
 
 #[derive(Clone)]
 pub enum State {
     // with closure
-    Chat(Arc<dyn Fn(&mut String) + Send + Sync>),
+    Chat((Arc<dyn Fn(&mut String) + Send + Sync>, Arc<RwLock<Vec<ChatCompletionRequestMessage>>>)),
     CodeCompletion,
     Other(String),
 }
@@ -34,103 +31,179 @@ impl State {
         match self {
             Self::Chat(_) => GPT_3_5,
             Self::CodeCompletion => CODE,
-            State::Other(model) => model.as_str()
+            State::Other(model) => model.as_str(),
         }
     }
 
-
-    fn get_url(&self) -> &str {
-        match self {
-            Self::Chat(_) => CHAT_COMPLETION,
-            Self::CodeCompletion => CODE_COMPLETION,
-            State::Other(_) => CODE_COMPLETION,
-        }
+    fn unwrap_completion_res(
+        &self,
+        res: CreateCompletionResponse,
+    ) -> Result<Vec<ResponseData>, String> {
+        Ok(res
+            .choices
+            .iter()
+            .map(|choice| ResponseData {
+                content: choice.text.to_string().trim().to_string(),
+                ..Default::default()
+            })
+            .collect())
     }
 
-    async fn unwrap_result(&self, res: Response) -> Result<Vec<ResponseData>, String> {
-        match self {
-            State::Chat(_) => {
-                let res = res.json::<CreateChatCompletionResponse>().await.map_err(|err| err
-                    .to_string())?;
-                Ok(res.choices.iter().map(|choice| {
-                    ResponseData {
-                        role: {
-                            let role = choice.message.role.to_string();
-                            // role[0] += 'A' - 'a';
-                            role.to_string()
-                        },
-                        content: choice.message
-                            .content.to_string().trim().to_string(),
-                    }
-                }).collect())
-            }
-            State::CodeCompletion => {
-                let res = res.json::<CreateCompletionResponse>().await.map_err(|err| err
-                    .to_string())?;
-                Ok(res.choices.iter().map(|choice| {
-                    ResponseData {
-                        content: choice.text.to_string().trim().to_string(),
-                        ..Default::default()
-                    }
-                }).collect())
-            }
-            State::Other(_) => {
-                let res = res.json::<CreateCompletionResponse>().await.map_err(|err| err
-                    .to_string())?;
-                Ok(res.choices.iter().map(|choice| {
-                    ResponseData {
-                        content: choice.text.to_string().trim().to_string(),
-                        ..Default::default()
-                    }
-                }).collect())
-            }
-        }
+    fn unwrap_chat_res(
+        &self,
+        res: CreateChatCompletionResponse,
+    ) -> Result<Vec<ResponseData>, String> {
+        Ok(res
+            .choices
+            .iter()
+            .map(|choice| {
+                ResponseData {
+                    role: {
+                        let role = choice.message.role.to_string();
+                        // role[0] += 'A' - 'a';
+                        role.to_string()
+                    },
+                    content: choice.message.content.to_string().trim().to_string(),
+                }
+            })
+            .collect())
     }
 
-    fn form_request_body(&self, content: String) -> Result<String, String> {
+    // fn unwrap_chat_res_stream(&self, res: ChatCompletionResponseStream) ->
+    //                                                                     Result<Vec<ResponseData>,
+    // String> {
+    //     Ok(res
+    //         .choices
+    //         .iter()
+    //         .map(|choice| {
+    //             ResponseData {
+    //                 role: {
+    //                     let role = choice.message.role.to_string();
+    //                     // role[0] += 'A' - 'a';
+    //                     role.to_string()
+    //                 },
+    //                 content: choice.message.content.to_string().trim().to_string(),
+    //             }
+    //         })
+    //         .collect())
+    // }
+
+    fn form_chat_request(
+        &self,
+        content: String,
+        save_context: bool,
+    ) -> Result<CreateChatCompletionRequest, String> {
         let model = self.get_model().to_string();
         match self {
-            Self::Chat(f) => {
+            Self::Chat((f, context)) => {
                 let mut content = content.to_string();
                 f(&mut content);
-                let req = CreateChatCompletionRequest {
-                    model,
-                    messages: vec![ChatCompletionRequestMessage {
-                        role: Role::User,
-                        content,
-                        name: None,
-                    }],
-                    temperature: Some(0.1),
-                    ..Default::default()
-                };
-                to_string(&req).map_err(|err| err.to_string())
+                CreateChatCompletionRequestArgs::default()
+                    .model(model)
+                    .messages({
+                        let new_message =
+                            ChatCompletionRequestMessage { role: Role::User, content, name: None };
+                        let mut new_context: Vec<_> =
+                            context.read().iter().map(|message| message.clone()).collect();
+                        if save_context {
+                            context.write().push(new_message.clone());
+                        }
+
+                        new_context.push(new_message);
+                        new_context
+                    })
+                    .temperature(0.0f32)
+                    .build()
+                    .map_err(|err| err.to_string())
             }
-            Self::CodeCompletion => {
-                let req = CreateCompletionRequest {
-                    model,
-                    prompt: Some(Prompt::String(content)),
-                    ..Default::default()
-                };
-                to_string(&req).map_err(|err| err.to_string())
-            }
-            _ => {
-                let req = CreateCompletionRequest {
-                    prompt: Some(Prompt::String(content)),
-                    ..Default::default()
-                };
-                to_string(&req).map_err(|err| err.to_string())
-            }
+            _ => Err("invalid state".to_string()),
+        }
+    }
+
+    fn form_completion_request(&self, content: String) -> Result<CreateCompletionRequest, String> {
+        let model = self.get_model().to_string();
+        match self {
+            Self::CodeCompletion => Ok(CreateCompletionRequest {
+                model,
+                prompt: Some(Prompt::String(content)),
+                ..Default::default()
+            }),
+            _ => Err("invalid state".to_string()),
+        }
+    }
+}
+
+/// Builder-style methods
+impl State {
+    pub fn chat() -> Self {
+        Self::Chat((Arc::new(|_: &mut String| {}), Default::default()))
+    }
+
+    pub fn chat_with_prefix(mut self, prefix: &str) -> Self {
+        let prefix = prefix.to_string();
+        if let Self::Chat((f, context)) = self {
+            let closure = Arc::new(move |original: &mut String| {
+                f(original);
+                original.insert_str(0, prefix.as_str());
+            });
+            self = Self::Chat((closure, context));
+        }
+        self
+    }
+
+    pub fn chat_with_closure(mut self, c: Arc<dyn Fn(&mut String) + Send + Sync>) -> Self {
+        if let Self::Chat((f, context)) = self {
+            let closure = Arc::new(move |original: &mut String| {
+                f(original);
+                c(original);
+            });
+            self = Self::Chat((closure, context));
+        }
+        self
+    }
+
+    // pub fn add_prefix(&mut self, prefix: String) {
+    //     if let Self::Chat((ref mut f, context)) = self {
+    //         let closure = Arc::new(move |original: &mut String| {
+    //             f(original);
+    //             original.insert_str(0, prefix.as_str());
+    //         }) as Arc<dyn Fn(&mut String) + Send + Sync>;
+    //         *f = closure;
+    //     }
+    // }
+
+    pub fn chat_with_suffix(mut self, suffix: &str) -> Self {
+        let suffix = suffix.to_string();
+        if let Self::Chat((f, context)) = self {
+            let closure = Arc::new(move |original: &mut String| {
+                f(original);
+                original.push_str(suffix.as_str());
+            });
+            self = Self::Chat((closure, context));
+        }
+        self
+    }
+
+    pub fn with_additional_context(self, message: ChatCompletionRequestMessage) -> Self {
+        if let Self::Chat((_, ref context)) = self {
+            context.write().push(message);
+        }
+        self
+    }
+
+    pub fn append_additional_context(&self, message: ChatCompletionRequestMessage) {
+        if let Self::Chat((_, ref context)) = self {
+            context.write().push(message);
         }
     }
 }
 
 #[derive(Clone)]
 pub struct ChatBot {
-    header: HeaderMap,
     client: Client,
     state: State,
+    save_context: bool,
 }
-
 
 #[derive(Clone, Default, Debug)]
 pub struct ResponseData {
@@ -140,25 +213,19 @@ pub struct ResponseData {
 
 impl ChatBot {
     pub fn new() -> Result<Self, String> {
+        // env::set_var("HTTP_PROXY", HTTP_PROXY);
+        // env::set_var("HTTPS_PROXY", HTTP_PROXY);
+        let key = env::var("OPENAI_API_KEY").map_err(|err| "Please set OPENAI_API_KEY environment variable")?;
         Ok(Self {
-            header: HeaderMap::from_iter(vec![
-                (
-                    HeaderName::from_static("authorization"),
-                    HeaderValue::from_str(format!("Bearer {KEY}").as_str()).map_err(|err| err
-                        .to_string())?,
-                ),
-                (
-                    HeaderName::from_static("content-type"),
-                    HeaderValue::from_static("application/json"),
-                ),
-            ]),
-            client: {
-                let http_proxy = Proxy::all(HTTP_PROXY).map_err(|err| err.to_string())?;
-                let client = Client::builder().proxy(http_proxy).build().unwrap();
-                client
-            },
-            state: State::Chat(Arc::new(|_s| {})),
+            client: Client::new().with_api_key(key.to_string()),
+            state: State::chat(),
+            save_context: false,
         })
+    }
+
+    pub fn save_context(mut self) -> Self {
+        self.save_context = true;
+        self
     }
 
     pub fn set_state(&mut self, state: State) {
@@ -166,59 +233,101 @@ impl ChatBot {
         println!("model changed to: {:?}", self.state.get_model());
     }
 
-    pub async fn completions_with_model(&self, content: String) -> Result<Vec<ResponseData>,
-        String> {
-        let body_str =
-            self.state.form_request_body(content)?;
-        let body = Body::from(body_str);
-        let req = self.client.post(self.state.get_url()).body(body).headers(self.header.clone())
-            .build()
-            .map_err(|err|
-                err
-                    .to_string
-                    ())?;
-        let res = self.client.execute(req).await.map_err(|err| err.to_string())?;
-
-        self.state.unwrap_result(res).await
+    pub fn state(&self) -> &State {
+        &self.state
     }
 
+    pub async fn completion(
+        &self,
+        content: String,
+        state: &State,
+    ) -> Result<Vec<ResponseData>, String> {
+        let req = state.form_completion_request(content)?;
+        let res = self.client.completions().create(req).await.map_err(|err| err.to_string())?;
+        println!("{:?}", res);
+        state.unwrap_completion_res(res)
+    }
 
-    pub async fn input_with_state(&self, content: String) -> Result<Vec<ResponseData>,
-        String> {
+    pub async fn chat(&self, content: String, state: &State) -> Result<Vec<ResponseData>, String> {
+        let req = state.form_chat_request(content.clone(), self.save_context)?;
+        let res = self.client.chat().create(req).await.map_err(|err| err.to_string())?;
+        if let Some(choice) = res.choices.first() {
+            state.append_additional_context(ChatCompletionRequestMessage {
+                role: choice.message.role.clone(),
+                content: choice.message.content.clone(),
+                name: None,
+            });
+        }
+        println!("{:?}", res);
+        state.unwrap_chat_res(res)
+    }
+
+    pub async fn chat_stream(
+        &self,
+        content: String,
+    ) -> Result<impl Stream<Item=Result<Vec<(Option<String>, Option<String>)>, String>>, String>
+    {
+        let req = self
+            .state
+            .form_chat_request(content, self.save_context)
+            .map_err(|err| err.to_string())?;
+        let stream = self.client.chat().create_stream(req).await.map_err(|err| err.to_string())?;
+        Ok(stream
+            .and_then(|res| {
+                future::ok(
+                    res.choices
+                        .into_iter()
+                        .map(|choice| {
+                            (choice.delta.content, choice.delta.role.map(|role| role.to_string()))
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .map_err(|err| err.to_string())
+            .into_stream())
+        // while let Some(res) = res.next().await {
+        //     res.map(|res| res)
+        // }
+        // Ok(res)
+    }
+
+    pub async fn input(&self, content: String) -> Result<Vec<ResponseData>, String> {
         let input = content.trim();
         if input.is_empty() {
             return Err("empty input".to_string());
         } else {
-            self.completions_with_model(content).await
+            match self.state {
+                State::Chat(_) => self.chat(content, &self.state).await,
+                State::CodeCompletion => self.completion(content, &self.state).await,
+                _ => self.completion(content, &self.state).await,
+            }
         }
     }
 
-    pub async fn chat(&self, content: String) -> Result<Vec<ResponseData>, String> {
-        self.completions_with_model(content).await
-    }
-
-    pub async fn code_completion(&self, content: String) -> Result<Vec<ResponseData>, String> {
-        self.completions_with_model(content).await
+    /// Input with an additional temporary state
+    pub async fn input_with_state(
+        &self,
+        content: String,
+        state: State,
+    ) -> Result<Vec<ResponseData>, String> {
+        let input = content.trim();
+        if input.is_empty() {
+            return Err("empty input".to_string());
+        } else {
+            match self.state {
+                State::Chat(_) => self.chat(content, &state).await,
+                State::CodeCompletion => self.completion(content, &state).await,
+                _ => self.completion(content, &state).await,
+            }
+        }
     }
 
     pub async fn list_model(&self) -> Result<(), String> {
-        let req = self.client.get(MODELS.to_string()).headers(self.header.clone()).build()
-            .map_err(|err|
-                err
-                    .to_string
-                    ())?;
+        let req = self.client.models().list().await.map_err(|err| err.to_string())?;
         println!("supported models:");
-        let res = self.client.execute(req).await.map_err(|err| err.to_string())?;
-        let result = res.json::<Map<String, Value>>().await.map_err(|err| err.to_string())?;
-        if let Some(Value::Array(models)) = result.get("data") {
-            models.iter().for_each(|model| {
-                if let Value::Object(model) = model {
-                    if let Some(Value::String(model)) = model.get("id") {
-                        println!("{}", model);
-                    }
-                }
-            })
-        }
+        req.data.iter().for_each(|model| {
+            println!("{}", model.id);
+        });
         Ok(())
     }
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 lazy_static! {
     /// roles
-    pub static ref CODE_EXPLAINER: State = State::Chat(Arc::new(|code_snippet| {
+    pub static ref CODE_EXPLAINER: State = State::chat().chat_with_closure(Arc::new(|code_snippet: &mut String| {
         code_snippet.insert_str(0, r#"
 I need you to provide a short explanation(a paragraph) to describe the functionality of a piece of code, which will be shown in an IDE, provided to developers.
 The goal is to help developers quickly pick up the idea of that code.
