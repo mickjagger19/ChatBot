@@ -19,7 +19,6 @@ pub(crate) mod url {
 
 mod model {
     pub(crate) const GPT_3_5: &'static str = "gpt-3.5-turbo";
-    pub(crate) const GPT: &'static str = "gpt-3.5-turbo";
     pub(crate) const CODE: &'static str = "code-davinci-002";
 }
 
@@ -95,7 +94,6 @@ impl ChatBot {
                     ())?;
         let res = self.client.execute(req).await.map_err(|err| err.to_string())?;
         let result = res.json::<Map<String, Value>>().await.map_err(|err| err.to_string())?;
-        println!("{:?}", result);
         if let Value::Array(choices) = result.get("choices").ok_or("No choices returned"
             .to_string())? {
             choices.iter().for_each(|choice| {
@@ -107,7 +105,7 @@ impl ChatBot {
                             "".to_string()
                         };
                         if let Some(Value::String(content)) = &message.get("content") {
-                            println!("{}:{}", role, content);
+                            println!("{}:\n{}", role, content.trim_start());
                         }
                     }
                 }
@@ -156,8 +154,8 @@ impl ChatBot {
 async fn main() {
     if let Ok(mut chat_bot) = ChatBot::new() {
         println!("Bot started");
-        let help = r#"This is a naive chat bot, implemented in Rust as a wrapper around OpenAI's API
-    Enter:
+        let help = r#"This is a naive chat bot, implemented in Rust as a wrapper around OpenAI's API. Feel free to use and submit suggestions!
+Enter:
 '-l' to list all openai models
 '-c ${{model_name}}' to customize your model (Some of the listed models may not be released by OpenAI yet)
 'code' to start code completion mode
