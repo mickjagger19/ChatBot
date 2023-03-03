@@ -1,7 +1,7 @@
 use std::io;
 use reqwest::{Body, Client, Proxy};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde_json::{Map, Value};
+use serde_json::{Map, to_string, Value};
 use crate::model::{CODE, GPT_3_5};
 use crate::url::CHAT_COMPLETION;
 
@@ -24,9 +24,11 @@ mod model {
 }
 
 
+#[derive(Debug)]
 enum State {
     Chat,
     CodeCompletion,
+    Other(String),
 }
 
 impl State {
@@ -34,6 +36,7 @@ impl State {
         match self {
             Self::Chat => GPT_3_5,
             Self::CodeCompletion => CODE,
+            State::Other(model) => model.as_str()
         }
     }
 }
@@ -70,6 +73,7 @@ impl ChatBot {
 
     pub fn set_state(&mut self, state: State) {
         self.state = state;
+        println!("model changed to: {:?}", self.state.get_model());
     }
 
 
@@ -82,8 +86,8 @@ impl ChatBot {
                     ("role".to_string(), Value::String("user".to_string())),
                     ("content".to_string(), Value::String(format!("{content}").to_string())),
                 ].into_iter()))]))].into_iter());
-        let body = Body::from(serde_json::to_string(&body_json).map_err(|err| err.to_string())?);
-        let req = self.client.post(url::CHAT_COMPLETION).body(body).headers(self.header.clone())
+        let body = Body::from(to_string(&body_json).map_err(|err| err.to_string())?);
+        let req = self.client.post(CHAT_COMPLETION).body(body).headers(self.header.clone())
             .build()
             .map_err(|err|
                 err
@@ -91,6 +95,7 @@ impl ChatBot {
                     ())?;
         let res = self.client.execute(req).await.map_err(|err| err.to_string())?;
         let result = res.json::<Map<String, Value>>().await.map_err(|err| err.to_string())?;
+        println!("{:?}", result);
         if let Value::Array(choices) = result.get("choices").ok_or("No choices returned"
             .to_string())? {
             choices.iter().for_each(|choice| {
@@ -111,10 +116,11 @@ impl ChatBot {
         Ok(())
     }
 
-    pub async fn input_with_state(&self, content: String) -> Result<(), String> {
-        self.completions_with_model(content, self.state.get_model()).await
+    pub async fn input_with_state(&self, content: String) {
+        if let Err(err) = self.completions_with_model(content, self.state.get_model()).await {
+            println!("err: {}", err);
+        }
     }
-
 
     pub async fn chat(&self, content: String) -> Result<(), String> {
         self.completions_with_model(content, GPT_3_5).await
@@ -130,13 +136,14 @@ impl ChatBot {
                 err
                     .to_string
                     ())?;
+        println!("supported models:");
         let res = self.client.execute(req).await.map_err(|err| err.to_string())?;
         let result = res.json::<Map<String, Value>>().await.map_err(|err| err.to_string())?;
         if let Some(Value::Array(models)) = result.get("data") {
             models.iter().for_each(|model| {
                 if let Value::Object(model) = model {
                     if let Some(Value::String(model)) = model.get("id") {
-                        println!("{}\n", model);
+                        println!("{}", model);
                     }
                 }
             })
@@ -149,35 +156,44 @@ impl ChatBot {
 async fn main() {
     if let Ok(mut chat_bot) = ChatBot::new() {
         println!("Bot started");
-        println!(r#"Enter:
-        'code' to start code completion mode
-        'chat' to start chatting
-        'q' to quit"#);
+        let help = r#"This is a naive chat bot, implemented in Rust as a wrapper around OpenAI's API
+    Enter:
+'-l' to list all openai models
+'-c ${{model_name}}' to customize your model (Some of the listed models may not be released by OpenAI yet)
+'code' to start code completion mode
+'chat' to start chatting
+'q' to quit"#;
+        println!("{}", help);
         let mut input = "".to_string();
         while let Ok(_input_size) = io::stdin().read_line(&mut input) {
-            let raw_input = input.strip_suffix(&['\r', '\n']).unwrap_or_default();
-            if raw_input == "q" {
+            let raw_input = input.trim_end().to_string();
+            if raw_input.is_empty() {} else if raw_input == "q" {
                 // quiting
                 return;
-            }
-            if raw_input == "-l" {
+            } else if raw_input == "-h" {
+                // print help
+                println!("{}", help);
+            } else if raw_input == "-l" {
                 // listing models
                 let _ = chat_bot.list_model().await;
-                continue;
-            }
-            if raw_input == "chat" {
+            } else if raw_input.starts_with("-c") {
+                // customizing models
+                let model = raw_input.trim_start_matches("-c ");
+                if model.is_empty() {
+                    println!("invalid format. Please check your input")
+                } else {
+                    chat_bot.set_state(State::Other(model.to_string()));
+                }
+            } else if raw_input == "chat" {
                 // code completion
                 chat_bot.set_state(State::Chat);
-                continue;
-            }
-
-            if raw_input == "code" {
+            } else if raw_input.eq("code") {
                 // code completion
                 chat_bot.set_state(State::CodeCompletion);
-                continue;
+            } else {
+                let _ = chat_bot.input_with_state(raw_input.to_string()).await;
             }
-
-            let _ = chat_bot.input_with_state(input.to_string()).await;
+            input.clear();
         }
     }
 }
