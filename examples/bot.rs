@@ -1,11 +1,10 @@
-use chat_toy::chatapi::ChatBot;
+use chat_toy::chat_api::ChatBot;
 
-use std::fmt::{Debug, format, Formatter, Pointer};
 use std::io;
+use std::sync::Arc;
 use reqwest::{Body, Client, get, Proxy};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde_json::{Map, to_string, Value};
-use chat_toy::chatapi::*;
+use chat_toy::chat_api::*;
+use chat_toy::roles;
 
 #[tokio::main]
 async fn main() {
@@ -45,21 +44,23 @@ Enter:
                 }
             } else if raw_input == "chat" {
                 // code completion
-                chat_bot.set_state(State::Chat(Box::new(|_| {})));
+                chat_bot.set_state(State::Chat(Arc::new(|_| {})));
             } else if raw_input == "explain" {
                 // code completion
-                chat_bot.set_state(State::Chat(Box::new(|s| {
-                    s.insert_str(0, "I need you to provide a short explanation(a paragraph) \
+                let explainer = State::Chat(Arc::new(|code_snippet| {
+                    code_snippet.insert_str(0, "I need you to provide a short, \
+                    summarized explanation(a few sentences) \
                     to describe the functionality of a piece of code, which will be shown in an \
                     IDE, provided to developers. The goal is to help developers quickly pick up \
-                    the idea of that code. Please explain the following piece of code to me: \n")
-                })));
+                    the idea of that code. Please explain the following piece of code to me: \n");
+                }));
+                chat_bot.set_state(explainer);
             } else if raw_input.eq("code") {
                 // code completion
                 chat_bot.set_state(State::CodeCompletion);
             } else {
-                match  chat_bot.input_with_state(raw_input.to_string()).await {
-                    Ok(res) => println!("{}", res),
+                match chat_bot.input_with_state(raw_input.to_string()).await {
+                    Ok(res) => println!("{}:\n\n{}", res.role, res.content),
                     Err(res) => println!("{}", res),
                 }
             }
