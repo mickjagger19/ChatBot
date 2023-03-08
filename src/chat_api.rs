@@ -13,6 +13,8 @@ use async_openai::types::{ChatCompletionRequestMessage, CreateChatCompletionRequ
 const HTTP_PROXY: &str = "http://q00569923:Heyjude19,.@proxyuk.huawei.com:8080";
 const KEY: &str = "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";
 
+
+#[derive(Clone)]
 pub enum State {
     // with closure
     Chat(Arc<dyn Fn(&mut String) + Send + Sync>),
@@ -52,7 +54,11 @@ impl State {
                     .to_string())?;
                 Ok(res.choices.iter().map(|choice| {
                     ResponseData {
-                        role: choice.message.role.to_string(),
+                        role: {
+                            let role = choice.message.role.to_string();
+                            // role[0] += 'A' - 'a';
+                            role.to_string()
+                        },
                         content: choice.message
                             .content.to_string().trim().to_string(),
                     }
@@ -94,6 +100,7 @@ impl State {
                         content,
                         name: None,
                     }],
+                    temperature: Some(0.1),
                     ..Default::default()
                 };
                 to_string(&req).map_err(|err| err.to_string())
@@ -117,6 +124,7 @@ impl State {
     }
 }
 
+#[derive(Clone)]
 pub struct ChatBot {
     header: HeaderMap,
     client: Client,
@@ -177,7 +185,12 @@ impl ChatBot {
 
     pub async fn input_with_state(&self, content: String) -> Result<Vec<ResponseData>,
         String> {
-        self.completions_with_model(content).await
+        let input = content.trim();
+        if input.is_empty() {
+            return Err("empty input".to_string());
+        } else {
+            self.completions_with_model(content).await
+        }
     }
 
     pub async fn chat(&self, content: String) -> Result<Vec<ResponseData>, String> {
