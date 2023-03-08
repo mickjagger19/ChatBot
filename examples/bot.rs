@@ -2,9 +2,7 @@ use chat_toy::chat_api::ChatBot;
 
 use std::io;
 use std::sync::Arc;
-use reqwest::{Body, Client, get, Proxy};
 use chat_toy::chat_api::*;
-use chat_toy::roles;
 
 #[tokio::main]
 async fn main() {
@@ -23,8 +21,6 @@ Enter:
         while let Ok(_input_size) = io::stdin().read_line(&mut input) {
             let raw_input = input.trim_end().to_string();
             // let args = cli::Args::try_parse_from([raw_input.to_string()].into_iter());
-
-
             if raw_input.is_empty() {} else if raw_input == "q" {
                 // quiting
                 return;
@@ -60,7 +56,7 @@ Enter:
                 chat_bot.set_state(State::CodeCompletion);
             } else {
                 match chat_bot.input_with_state(raw_input.to_string()).await {
-                    Ok(res) => println!("{}:\n\n{}", res.role, res.content),
+                    Ok(res) => println!("{}:\n\n{}", res[0].role, res[0].content),
                     Err(res) => println!("{}", res),
                 }
             }

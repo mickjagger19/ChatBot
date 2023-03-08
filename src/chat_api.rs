@@ -1,17 +1,15 @@
-use std::fmt::{Debug, format, Formatter, Pointer};
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use lazy_static::lazy_static;
-use reqwest::{Body, Client, get, Proxy, Response};
+use reqwest::{Body, Client, Proxy, Response};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Map, to_string, Value};
 use crate::model::model::{CODE, GPT_3_5};
-use crate::url;
 use crate::url::url::{CHAT_COMPLETION, CODE_COMPLETION};
 use crate::url::url::MODELS;
-use async_openai::*;
-use async_openai::types::{ChatCompletionRequestMessage, ChatCompletionResponseMessage, CreateChatCompletionRequest, CreateCompletionRequest, CreateCompletionResponse, Prompt, Role};
+use async_openai::types::{ChatCompletionRequestMessage, CreateChatCompletionRequest, CreateChatCompletionResponse, CreateCompletionRequest, CreateCompletionResponse, Prompt, Role};
 
-// const HTTP_PROXY: &str = "7.222.125.44:3128";
+// const HTTP_PROXY: &str = "http://p_vnextcie:vNext49!@proxyuk.huawei.com:8080";
 const HTTP_PROXY: &str = "http://q00569923:Heyjude19,.@proxyuk.huawei.com:8080";
 const KEY: &str = "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";
 
@@ -47,30 +45,38 @@ impl State {
         }
     }
 
-    async fn unwrap_result(&self, res: Response) -> Result<ResponseData, String> {
+    async fn unwrap_result(&self, res: Response) -> Result<Vec<ResponseData>, String> {
         match self {
             State::Chat(_) => {
-                let res = res.json::<ChatCompletionResponseMessage>().await.map_err(|err| err
+                let res = res.json::<CreateChatCompletionResponse>().await.map_err(|err| err
                     .to_string())?;
-                Ok(ResponseData { role: res.role.to_string(), content: res.content })
+                Ok(res.choices.iter().map(|choice| {
+                    ResponseData {
+                        role: choice.message.role.to_string(),
+                        content: choice.message
+                            .content.to_string().trim().to_string(),
+                    }
+                }).collect())
             }
             State::CodeCompletion => {
-                // choice.get("text").map(|text| {
-                //     let content = if let Value::String(text) = text {
-                //         text.to_string()
-                //     } else {
-                //         "".to_string()
-                //     };
-                //     ResponseData { content, ..Default::default() }
-                // }).ok_or(())
                 let res = res.json::<CreateCompletionResponse>().await.map_err(|err| err
                     .to_string())?;
-                Ok(ResponseData { content: res.choices[0].text.clone(), ..Default::default() })
+                Ok(res.choices.iter().map(|choice| {
+                    ResponseData {
+                        content: choice.text.to_string().trim().to_string(),
+                        ..Default::default()
+                    }
+                }).collect())
             }
             State::Other(_) => {
                 let res = res.json::<CreateCompletionResponse>().await.map_err(|err| err
                     .to_string())?;
-                Ok(ResponseData { content: res.choices[0].text.clone(), ..Default::default() })
+                Ok(res.choices.iter().map(|choice| {
+                    ResponseData {
+                        content: choice.text.to_string().trim().to_string(),
+                        ..Default::default()
+                    }
+                }).collect())
             }
         }
     }
@@ -152,7 +158,7 @@ impl ChatBot {
         println!("model changed to: {:?}", self.state.get_model());
     }
 
-    pub async fn completions_with_model(&self, content: String) -> Result<ResponseData,
+    pub async fn completions_with_model(&self, content: String) -> Result<Vec<ResponseData>,
         String> {
         let body_str =
             self.state.form_request_body(content)?;
@@ -169,16 +175,16 @@ impl ChatBot {
     }
 
 
-    pub async fn input_with_state(&self, content: String) -> Result<ResponseData,
+    pub async fn input_with_state(&self, content: String) -> Result<Vec<ResponseData>,
         String> {
         self.completions_with_model(content).await
     }
 
-    pub async fn chat(&self, content: String) -> Result<ResponseData, String> {
+    pub async fn chat(&self, content: String) -> Result<Vec<ResponseData>, String> {
         self.completions_with_model(content).await
     }
 
-    pub async fn code_completion(&self, content: String) -> Result<ResponseData, String> {
+    pub async fn code_completion(&self, content: String) -> Result<Vec<ResponseData>, String> {
         self.completions_with_model(content).await
     }
 
